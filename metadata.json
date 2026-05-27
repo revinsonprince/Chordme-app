@@ -1,0 +1,6 @@
+{
+  "name": "ChordMe",
+  "description": "Access ChordMe, your ultimate guitar chords and lyrics companion, with full offline caching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
