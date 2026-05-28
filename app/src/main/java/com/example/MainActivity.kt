@@ -18,6 +18,8 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import android.net.Uri
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -218,6 +220,28 @@ fun playGuitarTone(frequency: Double, durationSeconds: Double = 0.8) {
 }
 
 /**
+ * Launches Chrome Custom Tab inside the app for a secure browsing experience and Gmail integration.
+ */
+fun launchCustomTab(context: Context, url: String) {
+    try {
+        val customTabsIntent = CustomTabsIntent.Builder()
+            .setShowTitle(true)
+            .setInstantAppsEnabled(true)
+            .build()
+        customTabsIntent.launchUrl(context, Uri.parse(url))
+    } catch (e: Throwable) {
+        e.printStackTrace()
+        try {
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))
+            context.startActivity(intent)
+        } catch (t: Throwable) {
+            t.printStackTrace()
+            Toast.makeText(context, "Could not open secure browser.", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
+/**
  * Reactive online status state helper.
  */
 @Composable
@@ -296,6 +320,17 @@ fun WebViewScreen() {
     // Dialog state for Guitar Pitch Tuner
     var showTunerDialog by remember { mutableStateOf(false) }
 
+    var hasAutoLaunched by remember { mutableStateOf(false) }
+    var showChromeSyncBanner by remember { mutableStateOf(true) }
+
+    LaunchedEffect(isOnline) {
+        if (isOnline && !hasAutoLaunched) {
+            hasAutoLaunched = true
+            delay(1000)
+            launchCustomTab(context, baseUrl)
+        }
+    }
+
     // Intercept system back pressure
     BackHandler(enabled = canGoBack) {
         webViewInstance?.goBack()
@@ -309,7 +344,148 @@ fun WebViewScreen() {
                 .background(Color(0xFFFDF8FD)) // Match Geometric Balance background
         ) {
 
-        // Offline Banner (Section 1 of the design HTML, shown to state offline capabilities)
+            // Custom Top App Bar Row for Chrome Custom Tabs Companion
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFFDF8FD))
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .border(BorderStroke(0.5.dp, Color(0xFFE6E0E9)), RoundedCornerShape(0.dp)),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF6750A4)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_launcher_foreground_asset_1779867851791),
+                            contentDescription = "App Icon",
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "ChordMe Practice",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1D1B20)
+                        )
+                        Text(
+                            text = "Standard Mode",
+                            fontSize = 10.sp,
+                            color = Color(0xFF6750A4),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                // Chrome Custom Tab Launch action
+                Button(
+                    onClick = { launchCustomTab(context, baseUrl) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6750A4),
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(100.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Launch",
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Secure Chrome Sync", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            // Google Account Connection Banner
+            if (isOnline && showChromeSyncBanner) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color(0xFFEADDFF))
+                        .border(1.dp, Color(0xFFCAC4D0), RoundedCornerShape(24.dp))
+                        .padding(16.dp)
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(Color(0xFF6750A4)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Info,
+                                        contentDescription = "Secure Key Icon",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Text(
+                                    text = "Secure Google Account Sign-In",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF21005D)
+                                )
+                            }
+                            
+                            // Dismiss Button
+                            IconButton(
+                                onClick = { showChromeSyncBanner = false },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "Dismiss",
+                                    tint = Color(0xFF49454F),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                        
+                        Text(
+                            text = "Because Google restricts sign-in on embedded WebViews, you can log in, sync, and access Chrome-saved passwords securely by opening ChordMe in Chrome Custom Tabs.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF49454F),
+                            lineHeight = 15.sp
+                        )
+                        
+                        Button(
+                            onClick = { launchCustomTab(context, baseUrl) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF6750A4),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth().height(38.dp)
+                        ) {
+                            Text("Connect via Chrome Custom Tab", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            // Offline Banner (Section 1 of the design HTML, shown to state offline capabilities)
         if (!isOnline) {
             Box(
                 modifier = Modifier
