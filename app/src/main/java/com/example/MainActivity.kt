@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.media.AudioAttributes
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -160,19 +161,56 @@ fun playGuitarTone(frequency: Double, durationSeconds: Double = 0.8) {
                 generatedSnd[idx++] = ((valShort.toInt() and 0xff00) ushr 8).toByte()
             }
             
-            @Suppress("DEPRECATION")
-            val audioTrack = AudioTrack(
-                AudioManager.STREAM_MUSIC,
+            val minBufSize = AudioTrack.getMinBufferSize(
                 sampleRate,
                 AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                generatedSnd.size,
-                AudioTrack.MODE_STATIC
+                AudioFormat.ENCODING_PCM_16BIT
             )
-            audioTrack.write(generatedSnd, 0, generatedSnd.size)
-            audioTrack.play()
-            Thread.sleep((durationSeconds * 1000 + 100).toLong())
-            audioTrack.release()
+            
+            // For MODE_STATIC, the AudioTrack buffer size must be at least minBufSize 
+            // and exactly match the size of the written data. Pad with zeros if necessary.
+            val dataToWrite = if (minBufSize > 0 && generatedSnd.size < minBufSize) {
+                val padded = ByteArray(minBufSize)
+                System.arraycopy(generatedSnd, 0, padded, 0, generatedSnd.size)
+                padded
+            } else {
+                generatedSnd
+            }
+            
+            var audioTrack: AudioTrack? = null
+            try {
+                audioTrack = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(dataToWrite.size)
+                    .setTransferMode(AudioTrack.MODE_STATIC)
+                    .build()
+
+                if (audioTrack.state == AudioTrack.STATE_INITIALIZED) {
+                    audioTrack.write(dataToWrite, 0, dataToWrite.size)
+                    audioTrack.play()
+                    Thread.sleep((durationSeconds * 1000 + 100).toLong())
+                }
+            } catch (t: Throwable) {
+                t.printStackTrace()
+            } finally {
+                try {
+                    audioTrack?.release()
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
         } catch (e: Throwable) {
             e.printStackTrace()
         }
@@ -232,44 +270,6 @@ fun WebViewScreen() {
     val context = LocalContext.current
     val isOnline = rememberIsOnline()
 
-    // Google Account login states
-    val sharedPref = remember { context.getSharedPreferences("chordme_prefs", Context.MODE_PRIVATE) }
-    var userEmail by remember { mutableStateOf(sharedPref.getString("user_email", null)) }
-    var isLoggedIn by remember { mutableStateOf(!userEmail.isNullOrEmpty()) }
-    var showAccountDialog by remember { mutableStateOf(false) }
-
-    val accountChooserLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val accountName = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
-            if (!accountName.isNullOrEmpty()) {
-                sharedPref.edit().putString("user_email", accountName).apply()
-                userEmail = accountName
-                isLoggedIn = true
-                Toast.makeText(context, "Welcome, $accountName!", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
-    val triggerGoogleAccountSignIn = {
-        try {
-            val intent = AccountManager.newChooseAccountIntent(
-                null,
-                null,
-                arrayOf("com.google"),
-                null,
-                null,
-                null,
-                null
-            )
-            accountChooserLauncher.launch(intent)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            Toast.makeText(context, "Could not launch Google Sign In accounts selector", Toast.LENGTH_SHORT).show()
-        }
-    }
-    
     val baseUrl = "https://chordme1.netlify.app"
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
     
@@ -384,11 +384,7 @@ fun WebViewScreen() {
                     .fillMaxSize()
                     .testTag("web_view"),
                 factory = { ctx ->
-                    val swipeRefreshLayout = androidx.swiperefreshlayout.widget.SwipeRefreshLayout(ctx).apply {
-                        setColorSchemeColors(android.graphics.Color.parseColor("#6750A4"))
-                        setProgressBackgroundColorSchemeColor(android.graphics.Color.parseColor("#F3EDF7"))
-                    }
-                    val webView = WebView(ctx).apply {
+                    WebView(ctx).apply {
                         layoutParams = android.view.ViewGroup.LayoutParams(
                             android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                             android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -412,13 +408,8 @@ fun WebViewScreen() {
                             }
 
                             // Clean/Strip the UserAgent String to bypass the Google Sign-In "disallowed_useragent" WebView restriction
-                            val defaultUserAgent = userAgentString
-                            if (defaultUserAgent != null) {
-                                userAgentString = defaultUserAgent
-                                    .replace("; wv", "")
-                                    .replace("Version/4.0 ", "")
-                                    .replace("Version/4.0", "")
-                            }
+                            // We set a high-quality modern Google Chrome on Android User-Agent to prevent Google from falling back to legacy login
+                            userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
                         }
                         
                         webViewClient = object : WebViewClient() {
@@ -431,9 +422,15 @@ fun WebViewScreen() {
                                 isLoading = false
                                 progress = 1.0f
                                 isPageFinishedLoading = true
-                                swipeRefreshLayout.isRefreshing = false
                                 canGoBack = view?.canGoBack() == true
                                 canGoForward = view?.canGoForward() == true
+
+                                // Flush WebView cookies to disk to ensure session persistence across app launches
+                                try {
+                                    android.webkit.CookieManager.getInstance().flush()
+                                } catch (t: Throwable) {
+                                    t.printStackTrace()
+                                }
                             }
                             
                             override fun onReceivedError(
@@ -451,13 +448,12 @@ fun WebViewScreen() {
                                         hasError = true
                                     }
                                 }
-                                swipeRefreshLayout.isRefreshing = false
                             }
 
                             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                 val url = request?.url?.toString() ?: return false
                                 
-                                // Http and mud-standard links get loaded directly in WebView
+                                // Http and standard links get loaded directly in WebView
                                 if (url.startsWith("http://") || url.startsWith("https://")) {
                                     return false
                                 }
@@ -486,7 +482,7 @@ fun WebViewScreen() {
                                             }
                                         }
                                     }
-                                } catch (e: Exception) {
+                                } catch (e: Throwable) {
                                     e.printStackTrace()
                                 }
                                 return true // Prevent WebView from attempting to load custom schemes natively (saves from protocol error screens)
@@ -499,7 +495,6 @@ fun WebViewScreen() {
                                 isLoading = newProgress < 100
                                 if (newProgress >= 100) {
                                     isPageFinishedLoading = true
-                                    swipeRefreshLayout.isRefreshing = false
                                 }
                                 canGoBack = view?.canGoBack() == true
                                 canGoForward = view?.canGoForward() == true
@@ -509,24 +504,22 @@ fun WebViewScreen() {
                         loadUrl(baseUrl)
                         webViewInstance = this
                     }
-                    swipeRefreshLayout.addView(webView)
-                    swipeRefreshLayout.setOnRefreshListener {
-                        webView.reload()
-                    }
-                    webView.viewTreeObserver.addOnScrollChangedListener {
-                        swipeRefreshLayout.isEnabled = (webView.scrollY == 0)
-                    }
-                    swipeRefreshLayout
                 },
-                update = { swipeRefresh ->
-                    val webView = swipeRefresh.getChildAt(0) as? WebView
-                    if (webView != null) {
-                        webView.settings.cacheMode = if (isOnline) {
-                            WebSettings.LOAD_DEFAULT
-                        } else {
-                            WebSettings.LOAD_CACHE_ELSE_NETWORK
-                        }
-                        webViewInstance = webView
+                update = { webView ->
+                    webView.settings.cacheMode = if (isOnline) {
+                        WebSettings.LOAD_DEFAULT
+                    } else {
+                        WebSettings.LOAD_CACHE_ELSE_NETWORK
+                    }
+                    webViewInstance = webView
+                },
+                onRelease = { webView ->
+                    webViewInstance = null
+                    try {
+                        webView.stopLoading()
+                        webView.onPause()
+                    } catch (t: Throwable) {
+                        t.printStackTrace()
                     }
                 }
             )
@@ -779,99 +772,7 @@ fun WebViewScreen() {
                 }
             }
             
-            // Aesthetic Rounded FAB in bottom corners matching "Geometric Balance"
-            // Displays string pitch audio panel for offline users
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp)
-            ) {
-                IconButton(
-                    onClick = { showTunerDialog = true },
-                    modifier = Modifier
-                        .size(56.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color(0xFFD0BCFF))
-                        .border(1.dp, Color(0xFFCAC4D0), RoundedCornerShape(16.dp))
-                        .testTag("fab_tuner")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Guitar Tuner Pitch Tool",
-                        tint = Color(0xFF381E72),
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-            }
-        }
 
-        // Custom Navigation Controls conforming to h-[80px] and MD3 design style in HTML
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(80.dp)
-                .navigationBarsPadding(),
-            color = Color(0xFFF3EDF7),
-            border = BorderStroke(1.dp, Color(0xFFE6E0E9))
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp, bottom = 4.dp),
-                horizontalArrangement = Arrangement.SpaceAround,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                BottomNavItem(
-                    icon = Icons.AutoMirrored.Filled.ArrowBack,
-                    label = "Back",
-                    isActive = canGoBack,
-                    onClick = { webViewInstance?.goBack() },
-                    testTag = "back_button"
-                )
-
-                BottomNavItem(
-                    icon = Icons.AutoMirrored.Filled.ArrowForward,
-                    label = "Forward",
-                    isActive = canGoForward,
-                    onClick = { webViewInstance?.goForward() },
-                    testTag = "forward_button"
-                )
-
-                BottomNavItem(
-                    icon = Icons.Default.Home,
-                    label = "Home",
-                    isActive = !canGoBack,
-                    onClick = {
-                        hasError = false
-                        webViewInstance?.loadUrl(baseUrl)
-                    },
-                    testTag = "home_button"
-                )
-
-                BottomNavItem(
-                    icon = Icons.Default.Refresh,
-                    label = "Reload",
-                    isActive = true,
-                    onClick = {
-                        hasError = false
-                        webViewInstance?.reload()
-                    },
-                    testTag = "refresh_button"
-                )
-
-                BottomProfileNavItem(
-                    userEmail = userEmail,
-                    isLoggedIn = isLoggedIn,
-                    onClick = {
-                        if (isLoggedIn) {
-                            showAccountDialog = true
-                        } else {
-                            triggerGoogleAccountSignIn()
-                        }
-                    },
-                    testTag = "account_button"
-                )
-            }
         }
     }
 
@@ -1048,366 +949,4 @@ fun WebViewScreen() {
         )
     }
 
-    // --- Canva-style Overlays and Account dialogs ---
-    var showCanvaWelcome by remember { mutableStateOf(true) }
-
-    if (!isLoggedIn && showCanvaWelcome) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.55f))
-                .clickable(
-                    enabled = true,
-                    onClick = { /* block clicks */ },
-                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                    indication = null
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth(0.88f)
-                    .padding(16.dp),
-                shape = RoundedCornerShape(28.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFFDF8FD)),
-                elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    // Header block matching Canva's cute style
-                    Box(
-                        modifier = Modifier
-                            .size(64.dp)
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(Color(0xFFEADDFF)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "G",
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Black,
-                            color = Color(0xFF21005D),
-                            textAlign = TextAlign.Center
-                        )
-                    }
-
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            text = "Welcome to ChordMe",
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF1D1B20),
-                            textAlign = TextAlign.Center
-                        )
-                        Text(
-                            text = "Detect accounts on your device to log in instantly",
-                            fontSize = 13.sp,
-                            color = Color(0xFF49454F),
-                            textAlign = TextAlign.Center
-                        )
-                    }
-
-                    // Canva-like prominent White/Purple styled button for Google One Tap / Account Manager selection
-                    Button(
-                        onClick = { triggerGoogleAccountSignIn() },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp),
-                        shape = RoundedCornerShape(25.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6750A4))
-                    ) {
-                        Text(
-                            "Continue with Google",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
-
-                    // Simulated/alternative continue with email
-                    var showEmailInput by remember { mutableStateOf(false) }
-                    var dummyEmail by remember { mutableStateOf("") }
-                    
-                    if (!showEmailInput) {
-                        TextButton(
-                            onClick = { showEmailInput = true }
-                        ) {
-                            Text(
-                                "Continue with Email address",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF6750A4)
-                            )
-                        }
-                    } else {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            androidx.compose.material3.OutlinedTextField(
-                                value = dummyEmail,
-                                onValueChange = { dummyEmail = it },
-                                label = { Text("Email address") },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                shape = RoundedCornerShape(12.dp)
-                            )
-                            Button(
-                                onClick = {
-                                    if (dummyEmail.contains("@") && dummyEmail.contains(".")) {
-                                        sharedPref.edit().putString("user_email", dummyEmail).apply()
-                                        userEmail = dummyEmail
-                                        isLoggedIn = true
-                                        showCanvaWelcome = false
-                                    } else {
-                                        Toast.makeText(context, "Please enter a valid email", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6750A4))
-                            ) {
-                                Text("Continue")
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    // Guest option to bypass
-                    Text(
-                        text = "Continue as Guest",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Normal,
-                        color = Color(0xFF49454F),
-                        modifier = Modifier
-                            .clickable { showCanvaWelcome = false }
-                            .padding(8.dp)
-                    )
-                }
-            }
-        }
-    }
-
-    if (showAccountDialog && isLoggedIn) {
-        val email = userEmail ?: "user@gmail.com"
-        val displayName = email.substringBefore("@").replaceFirstChar { it.uppercase() }
-        val initials = if (displayName.length >= 2) displayName.substring(0, 2).uppercase() else displayName.take(1).uppercase()
-        
-        AlertDialog(
-            onDismissRequest = { showAccountDialog = false },
-            containerColor = Color(0xFFFDF8FD),
-            title = {
-                Text(
-                    text = "Google Account Info",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    color = Color(0xFF1D1B20)
-                )
-            },
-            text = {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(72.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF6750A4)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = initials,
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = displayName,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF1D1B20)
-                        )
-                        Text(
-                            text = email,
-                            fontSize = 13.sp,
-                            color = Color(0xFF49454F)
-                        )
-                    }
-                    Text(
-                        text = "Connected via Google Sign-In secure account detection.",
-                        fontSize = 12.sp,
-                        color = Color(0xFF49454F),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            },
-            confirmButton = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    TextButton(
-                        onClick = {
-                            sharedPref.edit().remove("user_email").apply()
-                            userEmail = null
-                            isLoggedIn = false
-                            showAccountDialog = false
-                            Toast.makeText(context, "Logged out of account", Toast.LENGTH_SHORT).show()
-                        },
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
-                    ) {
-                        Text("Log Out")
-                    }
-                    
-                    TextButton(
-                        onClick = { showAccountDialog = false },
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF6750A4))
-                    ) {
-                        Text("Close")
-                    }
-                }
-            }
-        )
-    }
-}
-
-/**
- * Geometric Balance Style custom Bottom Navigation Item representing standard item in MD3 specs
- */
-@Composable
-fun BottomNavItem(
-    icon: ImageVector,
-    label: String,
-    isActive: Boolean,
-    onClick: () -> Unit,
-    testTag: String
-) {
-    Column(
-        modifier = Modifier
-            .testTag(testTag)
-            .clickable(
-                enabled = isActive,
-                onClick = onClick
-            )
-            .padding(horizontal = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        // Pill capsule behind active item matching Geometric HTML
-        Box(
-            modifier = Modifier
-                .width(54.dp)
-                .height(32.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(if (isActive) Color(0xFFE8DEF8) else Color.Transparent),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = if (isActive) Color(0xFF1D192B) else Color(0xFF49454F).copy(alpha = 0.5f),
-                modifier = Modifier.size(20.dp)
-            )
-        }
-        Text(
-            text = label,
-            fontSize = 11.sp,
-            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-            color = if (isActive) Color(0xFF1D192B) else Color(0xFF49454F).copy(alpha = 0.6f)
-        )
-    }
-}
-
-@Composable
-fun BottomProfileNavItem(
-    userEmail: String?,
-    isLoggedIn: Boolean,
-    onClick: () -> Unit,
-    testTag: String
-) {
-    Column(
-        modifier = Modifier
-            .testTag(testTag)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        if (isLoggedIn && !userEmail.isNullOrEmpty()) {
-            val displayName = userEmail.substringBefore("@").replaceFirstChar { it.lowercase() }
-            val initials = if (displayName.length >= 2) displayName.substring(0, 2).uppercase() else displayName.take(1).uppercase()
-            Box(
-                modifier = Modifier
-                    .width(54.dp)
-                    .height(32.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFFE8DEF8)),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(24.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF6750A4)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = initials,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                }
-            }
-            Text(
-                text = "Account",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF1D192B)
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .width(54.dp)
-                    .height(32.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color.Transparent),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(22.dp)
-                        .clip(CircleShape)
-                        .border(1.dp, Color(0xFF49454F).copy(alpha = 0.5f), CircleShape)
-                        .background(Color.White),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "G",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Black,
-                        color = Color(0xFF6750A4)
-                    )
-                }
-            }
-            Text(
-                text = "Sign In",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                color = Color(0xFF49454F).copy(alpha = 0.6f)
-            )
-        }
-    }
 }
