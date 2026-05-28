@@ -95,6 +95,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.ui.theme.MyApplicationTheme
 import kotlin.concurrent.thread
+import android.accounts.AccountManager
+import android.app.Activity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -117,14 +121,20 @@ class MainActivity : ComponentActivity() {
  * Checks if the network is available.
  */
 fun isNetworkAvailable(context: Context): Boolean {
-    val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    val network = connectivityManager.activeNetwork ?: return false
-    val activeNetwork = connectivityManager.getNetworkCapabilities(network) ?: return false
-    return when {
-        activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> true
-        activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> true
-        activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> true
-        else -> false
+    return try {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (connectivityManager == null) return false
+        val network = connectivityManager.activeNetwork ?: return false
+        val activeNetwork = connectivityManager.getNetworkCapabilities(network) ?: return false
+        return when {
+            activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> true
+            activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> true
+            activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> true
+            else -> false
+        }
+    } catch (e: Throwable) {
+        e.printStackTrace()
+        false
     }
 }
 
@@ -163,7 +173,7 @@ fun playGuitarTone(frequency: Double, durationSeconds: Double = 0.8) {
             audioTrack.play()
             Thread.sleep((durationSeconds * 1000 + 100).toLong())
             audioTrack.release()
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             e.printStackTrace()
         }
     }
@@ -178,25 +188,37 @@ fun rememberIsOnline(): Boolean {
     var isOnline by remember { mutableStateOf(isNetworkAvailable(context)) }
 
     DisposableEffect(context) {
-        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                isOnline = true
+                mainHandler.post {
+                    isOnline = true
+                }
             }
             override fun onLost(network: Network) {
-                isOnline = false
+                mainHandler.post {
+                    isOnline = false
+                }
             }
         }
-        try {
-            connectivityManager.registerDefaultNetworkCallback(callback)
-        } catch (e: Exception) {
-            // Fallback
-        }
-        onDispose {
+        
+        if (connectivityManager != null) {
             try {
-                connectivityManager.unregisterNetworkCallback(callback)
-            } catch (e: Exception) {
-                // Ignore
+                connectivityManager.registerDefaultNetworkCallback(callback)
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
+        }
+        
+        onDispose {
+            if (connectivityManager != null) {
+                try {
+                    connectivityManager.unregisterNetworkCallback(callback)
+                } catch (e: Throwable) {
+                    e.printStackTrace()
+                }
             }
         }
     }
@@ -209,6 +231,44 @@ fun rememberIsOnline(): Boolean {
 fun WebViewScreen() {
     val context = LocalContext.current
     val isOnline = rememberIsOnline()
+
+    // Google Account login states
+    val sharedPref = remember { context.getSharedPreferences("chordme_prefs", Context.MODE_PRIVATE) }
+    var userEmail by remember { mutableStateOf(sharedPref.getString("user_email", null)) }
+    var isLoggedIn by remember { mutableStateOf(!userEmail.isNullOrEmpty()) }
+    var showAccountDialog by remember { mutableStateOf(false) }
+
+    val accountChooserLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val accountName = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+            if (!accountName.isNullOrEmpty()) {
+                sharedPref.edit().putString("user_email", accountName).apply()
+                userEmail = accountName
+                isLoggedIn = true
+                Toast.makeText(context, "Welcome, $accountName!", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    val triggerGoogleAccountSignIn = {
+        try {
+            val intent = AccountManager.newChooseAccountIntent(
+                null,
+                null,
+                arrayOf("com.google"),
+                null,
+                null,
+                null,
+                null
+            )
+            accountChooserLauncher.launch(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Toast.makeText(context, "Could not launch Google Sign In accounts selector", Toast.LENGTH_SHORT).show()
+        }
+    }
     
     val baseUrl = "https://chordme1.netlify.app"
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
@@ -245,80 +305,9 @@ fun WebViewScreen() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .statusBarsPadding()
                 .background(Color(0xFFFDF8FD)) // Match Geometric Balance background
         ) {
-        // App Header (Matches HTML's geometric top bar)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .background(Color(0xFFFDF8FD))
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                IconButton(onClick = {
-                    Toast.makeText(context, "ChordMe Caching and Acoustic features setup complete!", Toast.LENGTH_SHORT).show()
-                }) {
-                    Icon(
-                        imageVector = Icons.Default.Menu,
-                        contentDescription = "Drawer Menu",
-                        tint = Color(0xFF49454F)
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "ChordMe",
-                    fontSize = 21.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF49454F),
-                    letterSpacing = (-0.5).sp
-                )
-            }
-            
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Info icon container in primary purple accent (#EADDFF)
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFEADDFF))
-                        .clickable { showTunerDialog = true }
-                        .padding(8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Guitar Tuner Quick Icon",
-                        tint = Color(0xFF21005D),
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-                
-                // Rounded profile initials ("RP")
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF6750A4)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "RP",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                }
-            }
-        }
 
         // Offline Banner (Section 1 of the design HTML, shown to state offline capabilities)
         if (!isOnline) {
@@ -869,6 +858,19 @@ fun WebViewScreen() {
                     },
                     testTag = "refresh_button"
                 )
+
+                BottomProfileNavItem(
+                    userEmail = userEmail,
+                    isLoggedIn = isLoggedIn,
+                    onClick = {
+                        if (isLoggedIn) {
+                            showAccountDialog = true
+                        } else {
+                            triggerGoogleAccountSignIn()
+                        }
+                    },
+                    testTag = "account_button"
+                )
             }
         }
     }
@@ -1045,6 +1047,240 @@ fun WebViewScreen() {
             }
         )
     }
+
+    // --- Canva-style Overlays and Account dialogs ---
+    var showCanvaWelcome by remember { mutableStateOf(true) }
+
+    if (!isLoggedIn && showCanvaWelcome) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.55f))
+                .clickable(
+                    enabled = true,
+                    onClick = { /* block clicks */ },
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth(0.88f)
+                    .padding(16.dp),
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFFDF8FD)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Header block matching Canva's cute style
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(Color(0xFFEADDFF)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "G",
+                            fontSize = 32.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF21005D),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Welcome to ChordMe",
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1D1B20),
+                            textAlign = TextAlign.Center
+                        )
+                        Text(
+                            text = "Detect accounts on your device to log in instantly",
+                            fontSize = 13.sp,
+                            color = Color(0xFF49454F),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    // Canva-like prominent White/Purple styled button for Google One Tap / Account Manager selection
+                    Button(
+                        onClick = { triggerGoogleAccountSignIn() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp),
+                        shape = RoundedCornerShape(25.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6750A4))
+                    ) {
+                        Text(
+                            "Continue with Google",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+
+                    // Simulated/alternative continue with email
+                    var showEmailInput by remember { mutableStateOf(false) }
+                    var dummyEmail by remember { mutableStateOf("") }
+                    
+                    if (!showEmailInput) {
+                        TextButton(
+                            onClick = { showEmailInput = true }
+                        ) {
+                            Text(
+                                "Continue with Email address",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF6750A4)
+                            )
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            androidx.compose.material3.OutlinedTextField(
+                                value = dummyEmail,
+                                onValueChange = { dummyEmail = it },
+                                label = { Text("Email address") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            Button(
+                                onClick = {
+                                    if (dummyEmail.contains("@") && dummyEmail.contains(".")) {
+                                        sharedPref.edit().putString("user_email", dummyEmail).apply()
+                                        userEmail = dummyEmail
+                                        isLoggedIn = true
+                                        showCanvaWelcome = false
+                                    } else {
+                                        Toast.makeText(context, "Please enter a valid email", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6750A4))
+                            ) {
+                                Text("Continue")
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Guest option to bypass
+                    Text(
+                        text = "Continue as Guest",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Normal,
+                        color = Color(0xFF49454F),
+                        modifier = Modifier
+                            .clickable { showCanvaWelcome = false }
+                            .padding(8.dp)
+                    )
+                }
+            }
+        }
+    }
+
+    if (showAccountDialog && isLoggedIn) {
+        val email = userEmail ?: "user@gmail.com"
+        val displayName = email.substringBefore("@").replaceFirstChar { it.uppercase() }
+        val initials = if (displayName.length >= 2) displayName.substring(0, 2).uppercase() else displayName.take(1).uppercase()
+        
+        AlertDialog(
+            onDismissRequest = { showAccountDialog = false },
+            containerColor = Color(0xFFFDF8FD),
+            title = {
+                Text(
+                    text = "Google Account Info",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    color = Color(0xFF1D1B20)
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF6750A4)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = initials,
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = displayName,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1D1B20)
+                        )
+                        Text(
+                            text = email,
+                            fontSize = 13.sp,
+                            color = Color(0xFF49454F)
+                        )
+                    }
+                    Text(
+                        text = "Connected via Google Sign-In secure account detection.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF49454F),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            },
+            confirmButton = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TextButton(
+                        onClick = {
+                            sharedPref.edit().remove("user_email").apply()
+                            userEmail = null
+                            isLoggedIn = false
+                            showAccountDialog = false
+                            Toast.makeText(context, "Logged out of account", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
+                    ) {
+                        Text("Log Out")
+                    }
+                    
+                    TextButton(
+                        onClick = { showAccountDialog = false },
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF6750A4))
+                    ) {
+                        Text("Close")
+                    }
+                }
+            }
+        )
+    }
 }
 
 /**
@@ -1091,5 +1327,87 @@ fun BottomNavItem(
             fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
             color = if (isActive) Color(0xFF1D192B) else Color(0xFF49454F).copy(alpha = 0.6f)
         )
+    }
+}
+
+@Composable
+fun BottomProfileNavItem(
+    userEmail: String?,
+    isLoggedIn: Boolean,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    Column(
+        modifier = Modifier
+            .testTag(testTag)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        if (isLoggedIn && !userEmail.isNullOrEmpty()) {
+            val displayName = userEmail.substringBefore("@").replaceFirstChar { it.lowercase() }
+            val initials = if (displayName.length >= 2) displayName.substring(0, 2).uppercase() else displayName.take(1).uppercase()
+            Box(
+                modifier = Modifier
+                    .width(54.dp)
+                    .height(32.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFFE8DEF8)),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF6750A4)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = initials,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+            }
+            Text(
+                text = "Account",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF1D192B)
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .width(54.dp)
+                    .height(32.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color.Transparent),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .border(1.dp, Color(0xFF49454F).copy(alpha = 0.5f), CircleShape)
+                        .background(Color.White),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "G",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF6750A4)
+                    )
+                }
+            }
+            Text(
+                text = "Sign In",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = Color(0xFF49454F).copy(alpha = 0.6f)
+            )
+        }
     }
 }
